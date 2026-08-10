@@ -1,0 +1,15 @@
+# deps contains the independent vllm and vllm-ascend repositories
+/deps/
+
+# Runtime/build artifacts
+/artifacts/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Common generated files
+__pycache__/
+*.pyc
