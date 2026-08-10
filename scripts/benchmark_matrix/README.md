@@ -6,6 +6,44 @@
 /home/w00985415/proj_260805/scripts/benchmark_matrix/
 ```
 
+## 模型路径变量
+
+模型权重与 tokenizer 位于同一目录时，只需要传入 `MODEL_PATH`：
+
+```bash
+MODEL_PATH=/mnt/a800_weight/目标模型目录 \
+MATRIX_MODE=smoke \
+bash run_dsv4_feature_matrix.sh
+```
+
+`TOKENIZER_PATH` 默认自动继承 `MODEL_PATH`。如果二者不在同一目录，也可以分别覆盖：
+
+```bash
+MODEL_PATH=/path/to/model \
+TOKENIZER_PATH=/path/to/tokenizer \
+MATRIX_MODE=smoke \
+bash run_dsv4_feature_matrix.sh
+```
+
+未传变量时，默认模型目录为 `/mnt/a800_weight/DeepSeek-V4-Flash-w8a8-mtp`。每次实验使用的两个路径都会写入 `matrix-config.txt`。
+
+## 查看测试进度
+
+终端会显示全矩阵进度、累计耗时和粗略 ETA。也可以在另一个终端持续查看最新实验：
+
+```bash
+LATEST_MATRIX="$(ls -dt /home/w00985415/proj_260805/artifacts/benchmark_matrix/matrix_* | head -n 1)"
+tail -f "${LATEST_MATRIX}/progress.log"
+```
+
+典型输出：
+
+```text
+[#######-----------------------] 25.0% | 3/12 | elapsed 01:01:01 | rough ETA 03:03:03 | completed cpp_only_fixed_long_r1
+```
+
+这里的 ETA 是按已经完成的 benchmark 轮次估算的。定长、变长和 SRF 混合负载耗时不同，因此开始几轮的 ETA 波动较大；完成同类负载后会逐渐更有参考价值。单轮内部仍会显示 `vllm bench` 自带的请求级进度。
+
 ## 数据与判据
 
 脚本按二进制 K 生成并重新分词校验：

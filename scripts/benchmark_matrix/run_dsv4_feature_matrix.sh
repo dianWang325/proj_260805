@@ -4,10 +4,14 @@ set -Eeuo pipefail
 
 BASE_DIR="${BASE_DIR:-/home/w00985415/proj_260805}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/progress_helpers.sh"
 START_SCRIPT="${START_SCRIPT:-${BASE_DIR}/scripts/start_dsv4_cpp_srf.sh}"
 WORKLOAD_SCRIPT="${WORKLOAD_SCRIPT:-${SCRIPT_DIR}/run_serving_workloads.sh}"
 GENERATOR_SCRIPT="${GENERATOR_SCRIPT:-${SCRIPT_DIR}/generate_long_sequence_datasets.py}"
 ANALYZER_SCRIPT="${ANALYZER_SCRIPT:-${SCRIPT_DIR}/analyze_serving_results.py}"
+MODEL_PATH="${MODEL_PATH:-/mnt/a800_weight/DeepSeek-V4-Flash-w8a8-mtp}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
+MODEL_NAME="${MODEL_NAME:-dsv4}"
 
 MATRIX_MODE="${MATRIX_MODE:-smoke}"
 VARIANTS="${VARIANTS:-baseline,cpp_only,srf_only,cpp_srf}"
@@ -72,6 +76,8 @@ MATRIX_ID="${MATRIX_ID:-$(date '+%Y%m%d_%H%M%S')}"
 MATRIX_ROOT="${MATRIX_ROOT:-${BASE_DIR}/artifacts/benchmark_matrix/matrix_${MATRIX_ID}}"
 MATRIX_CONFIG="${MATRIX_ROOT}/matrix-config.txt"
 DATASET_DIR="${MATRIX_ROOT}/datasets"
+MATRIX_PROGRESS_LOG="${MATRIX_ROOT}/progress.log"
+MATRIX_START_EPOCH="$(date +%s)"
 
 SERVICE_PID=""
 SERVICE_PGID=""
@@ -169,6 +175,8 @@ start_variant() {
     echo "[$(date --iso-8601=seconds)] Starting ${variant}: CPP=${cpp_enabled}, SRF=${srf_enabled}"
     setsid env \
         BASE_DIR="${BASE_DIR}" \
+        MODEL_PATH="${MODEL_PATH}" \
+        MODEL_NAME="${MODEL_NAME}" \
         VLLM_PORT="${VLLM_PORT}" \
         CPP_ENABLED="${cpp_enabled}" \
         SRF_ENABLED="${srf_enabled}" \
@@ -203,11 +211,31 @@ if health_check; then
     exit 2
 fi
 
+if [[ ! -d "${MODEL_PATH}" ]]; then
+    echo "ERROR: model directory does not exist: ${MODEL_PATH}" >&2
+    exit 2
+fi
+if [[ ! -d "${TOKENIZER_PATH}" ]]; then
+    echo "ERROR: tokenizer directory does not exist: ${TOKENIZER_PATH}" >&2
+    exit 2
+fi
+
 mkdir -p "${MATRIX_ROOT}"
+IFS=',' read -r -a VARIANT_LIST <<<"${VARIANTS}"
+IFS=',' read -r -a MATRIX_WORKLOAD_LIST <<<"${WORKLOADS}"
+TOTAL_BENCH_RUNS=$((${#VARIANT_LIST[@]} * ${#MATRIX_WORKLOAD_LIST[@]} * REPEATS))
+WORKLOAD_RUNS_PER_VARIANT=$((${#MATRIX_WORKLOAD_LIST[@]} * REPEATS))
+: >"${MATRIX_PROGRESS_LOG}"
+progress_emit 0 "${TOTAL_BENCH_RUNS}" "${MATRIX_START_EPOCH}" \
+    "preparing datasets and services" "${MATRIX_PROGRESS_LOG}"
+
 {
     echo "matrix_id=${MATRIX_ID}"
     echo "created_at=$(date --iso-8601=seconds)"
     echo "matrix_mode=${MATRIX_MODE}"
+    echo "model_path=${MODEL_PATH}"
+    echo "tokenizer_path=${TOKENIZER_PATH}"
+    echo "model_name=${MODEL_NAME}"
     echo "variants=${VARIANTS}"
     echo "workloads=${WORKLOADS}"
     echo "repeats=${REPEATS}"
@@ -234,7 +262,7 @@ mkdir -p "${MATRIX_ROOT}"
 
 echo "[$(date --iso-8601=seconds)] Generating exact-token datasets"
 /usr/local/python3.11.10/bin/python3.11 "${GENERATOR_SCRIPT}" \
-    --tokenizer /mnt/a800_weight/DeepSeek-V4-Flash-w8a8-mtp \
+    --tokenizer "${TOKENIZER_PATH}" \
     --output-dir "${DATASET_DIR}" \
     --fixed-count "${FIXED_PROMPTS}" \
     --variable-count "${VARIABLE_PROMPTS}" \
@@ -250,13 +278,20 @@ echo "[$(date --iso-8601=seconds)] Generating exact-token datasets"
     --srf-output-len "${SRF_OUTPUT_LEN}" \
     --seed 0 | tee "${MATRIX_ROOT}/dataset-generation.log"
 
-IFS=',' read -r -a VARIANT_LIST <<<"${VARIANTS}"
+variant_index=0
 for variant in "${VARIANT_LIST[@]}"; do
     read -r cpp_enabled srf_enabled < <(variant_flags "${variant}")
     variant_dir="${MATRIX_ROOT}/${variant}"
+    global_offset=$((variant_index * WORKLOAD_RUNS_PER_VARIANT))
+    progress_emit "${global_offset}" "${TOTAL_BENCH_RUNS}" \
+        "${MATRIX_START_EPOCH}" \
+        "starting service ${variant}" "${MATRIX_PROGRESS_LOG}"
     start_variant "${variant}" "${cpp_enabled}" "${srf_enabled}" "${variant_dir}"
     env \
         BASE_DIR="${BASE_DIR}" \
+        MODEL_PATH="${MODEL_PATH}" \
+        TOKENIZER_PATH="${TOKENIZER_PATH}" \
+        MODEL_NAME="${MODEL_NAME}" \
         VLLM_PORT="${VLLM_PORT}" \
         VARIANT="${variant}" \
         RESULT_DIR="${variant_dir}/results" \
@@ -271,14 +306,23 @@ for variant in "${VARIANT_LIST[@]}"; do
         VARIABLE_CONCURRENCY="${VARIABLE_CONCURRENCY}" \
         SRF_MIXED_CONCURRENCY="${SRF_MIXED_CONCURRENCY}" \
         SRF_THRESHOLD="${SRF_THRESHOLD}" \
+        PROGRESS_TOTAL_RUNS="${TOTAL_BENCH_RUNS}" \
+        PROGRESS_OFFSET_RUNS="${global_offset}" \
+        MATRIX_START_EPOCH="${MATRIX_START_EPOCH}" \
+        MATRIX_PROGRESS_LOG="${MATRIX_PROGRESS_LOG}" \
         bash "${WORKLOAD_SCRIPT}" 2>&1 | tee "${variant_dir}/benchmark-suite.log"
     stop_service
+    variant_index=$((variant_index + 1))
 done
 
+progress_emit "${TOTAL_BENCH_RUNS}" "${TOTAL_BENCH_RUNS}" \
+    "${MATRIX_START_EPOCH}" "analyzing results" "${MATRIX_PROGRESS_LOG}"
 /usr/local/python3.11.10/bin/python3.11 \
     "${ANALYZER_SCRIPT}" "${MATRIX_ROOT}" \
     --threshold "${SRF_THRESHOLD}" --device-count "${DEVICE_COUNT}"
 
+progress_emit "${TOTAL_BENCH_RUNS}" "${TOTAL_BENCH_RUNS}" \
+    "${MATRIX_START_EPOCH}" "matrix completed" "${MATRIX_PROGRESS_LOG}"
 echo "Matrix completed: ${MATRIX_ROOT}"
 echo "Summary: ${MATRIX_ROOT}/matrix_summary.md"
 echo "Acceptance report: ${MATRIX_ROOT}/acceptance_report.md"

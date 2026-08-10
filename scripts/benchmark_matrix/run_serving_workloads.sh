@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/progress_helpers.sh"
 
 BASE_DIR="${BASE_DIR:-/home/w00985415/proj_260805}"
+MODEL_PATH="${MODEL_PATH:-/mnt/a800_weight/DeepSeek-V4-Flash-w8a8-mtp}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 MODEL_NAME="${MODEL_NAME:-dsv4}"
-TOKENIZER_PATH="${TOKENIZER_PATH:-/mnt/a800_weight/DeepSeek-V4-Flash-w8a8-mtp}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8013}"
 VARIANT="${VARIANT:?VARIANT must be set}"
@@ -27,6 +30,11 @@ SRF_MIXED_CONCURRENCY="${SRF_MIXED_CONCURRENCY:-16}"
 
 VLLM_BIN="${VLLM_BIN:-/usr/local/python3.11.10/bin/vllm}"
 BASE_URL="http://${VLLM_HOST}:${VLLM_PORT}"
+PROGRESS_TOTAL_RUNS="${PROGRESS_TOTAL_RUNS:-0}"
+PROGRESS_OFFSET_RUNS="${PROGRESS_OFFSET_RUNS:-0}"
+MATRIX_START_EPOCH="${MATRIX_START_EPOCH:-$(date +%s)}"
+MATRIX_PROGRESS_LOG="${MATRIX_PROGRESS_LOG:-}"
+LOCAL_COMPLETED_RUNS=0
 
 check_positive_integer() {
     local name="$1"
@@ -134,6 +142,11 @@ run_one() {
         printf '\n'
     } >"${command_file}"
 
+    progress_emit \
+        "$((PROGRESS_OFFSET_RUNS + LOCAL_COMPLETED_RUNS))" \
+        "${PROGRESS_TOTAL_RUNS}" "${MATRIX_START_EPOCH}" \
+        "running ${stem}" "${MATRIX_PROGRESS_LOG}"
+
     echo "[$(date --iso-8601=seconds)] Starting ${stem}"
     "${command[@]}" 2>&1 | tee "${client_log}"
     if [[ ! -s "${result_file}" ]]; then
@@ -141,6 +154,11 @@ run_one() {
         exit 1
     fi
     echo "[$(date --iso-8601=seconds)] Completed ${stem}"
+    LOCAL_COMPLETED_RUNS=$((LOCAL_COMPLETED_RUNS + 1))
+    progress_emit \
+        "$((PROGRESS_OFFSET_RUNS + LOCAL_COMPLETED_RUNS))" \
+        "${PROGRESS_TOTAL_RUNS}" "${MATRIX_START_EPOCH}" \
+        "completed ${stem}" "${MATRIX_PROGRESS_LOG}"
 }
 
 run_workload() {
@@ -174,6 +192,12 @@ run_workload() {
 }
 
 IFS=',' read -r -a WORKLOAD_LIST <<<"${WORKLOADS}"
+if ((PROGRESS_TOTAL_RUNS <= 0)); then
+    PROGRESS_TOTAL_RUNS=$((${#WORKLOAD_LIST[@]} * REPEATS))
+    PROGRESS_OFFSET_RUNS=0
+fi
+progress_emit "${PROGRESS_OFFSET_RUNS}" "${PROGRESS_TOTAL_RUNS}" \
+    "${MATRIX_START_EPOCH}" "starting ${VARIANT} suite" "${MATRIX_PROGRESS_LOG}"
 for workload in "${WORKLOAD_LIST[@]}"; do
     run_workload "${workload}"
 done
